@@ -1,6 +1,7 @@
 import os
 import json
 
+import stripe
 from flask import Flask
 from flask_jwt_extended import JWTManager
 
@@ -13,6 +14,7 @@ from controllers import *
 logger = get_logger(__name__)
 
 app = Flask(__name__)
+stripe.api_key = os.environ['stripe_api_key']
 app.config['JWT_SECRET_KEY'] = os.environ['secret_key']
 app.config['JWT_HEADER_NAME'] = os.environ['jwt_header_name']
 app.config['JWT_HEADER_TYPE'] = ''
