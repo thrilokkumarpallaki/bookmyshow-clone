@@ -1,10 +1,12 @@
 from __future__ import annotations
 from typing import Any
-from pydantic import BaseModel, Field, Extra, PositiveFloat, HttpUrl
+
+import pytz
+from pydantic import BaseModel, Field, Extra, PositiveFloat, PositiveInt, HttpUrl, validator
 
 from . import *
 from log_util import get_logger
-from utils import generate_pre_signed_s3_url
+from utils import generate_pre_signed_s3_urls
 
 logger = get_logger(__name__)
 
@@ -26,13 +28,31 @@ class PydntMovieModel(BaseModel):
         orm_mode = True
         title = 'Movie'
         extras = Extra.forbid
+        validate_assignment = True
+        anystr_strip_whitespace = True
+
+    @validator('movie_end_date')
+    def validate_movie_start_end_date(cls, field_value, values):
+        """ Validate movie start date is less than or equal to movie end date.
+        If not. It raises a ValueError.
+        """
+        if field_value is None:
+            return field_value
+
+        movie_start_date = values.get('movie_start_date')
+        movie_end_date = field_value.replace(tzinfo=pytz.UTC)
+
+        if movie_start_date > movie_end_date:
+            raise ValueError("movie_end_date cannot be less than movie_start_date.")
+        return field_value
 
 
 class PydntMovieStarModel(BaseModel):
     id: int = Field(None)
     star_name: str = Field(..., max_length=50)
-    image_urls: list[str] = Field(None, max_items=10)
-    total_movies: int = Field(..., ge=0)
+    carrier_started_at: date = Field(...)
+    total_movies: int = Field(default=0)
+    image_urls: list[HttpUrl] = Field(None, max_items=10)
     created_at: datetime = Field(None)
     modified_at: datetime = Field(None)
 
@@ -40,6 +60,37 @@ class PydntMovieStarModel(BaseModel):
         orm_mode = True
         title = 'Movie Star'
         extras = Extra.forbid
+        validate_assignment = True
+        anystr_strip_whitespace = True
+
+    @validator('carrier_started_at', pre=True)
+    def convert_carrier_start_date(cls, field_value):
+        if isinstance(field_value, str):
+            datetime.strptime(field_value, '%Y-%m-%d')
+        return field_value
+
+    @validator('carrier_started_at')
+    def validate_carrier_started_at(cls, field_value):
+        today = datetime.now().date()
+        if field_value > today:
+            raise ValueError('Carrier start date cannot be future date.')
+        return field_value
+
+
+class PydntMovieStarRelationModel(BaseModel):
+    movie_id: int = Field(None, gt=0)
+    star_ids: list[int] = Field(None, gt=0)
+
+    class Config:
+        title = 'Movie Star Mapping'
+        extras = Extra.forbid
+        validate_assignment = True
+
+    @validator('star_ids', each_item=True)
+    def validate_star_ids(cls, field_value, values):
+        movie_id = values.get('movie_id')
+        if not isinstance(field_value, int):
+            raise ValueError(f'Invalid star id {field_value}. Cannot create relation with movie id {movie_id}.')
 
 
 class MovieModel(Base):
@@ -66,6 +117,7 @@ class MovieModel(Base):
         except Exception as e:
             logger.exception(e, exc_info=True)
         finally:
+            session.close()
             return movie_obj
 
     def set_movie_end_date(self, override: bool = False) -> MovieModel:
@@ -124,7 +176,7 @@ class MovieModel(Base):
         status = True
         msg = ''
         try:
-            movies_base_query = session.query(MovieModel).filter(MovieModel.is_deleted == False)
+            movies_base_query = session.query(MovieModel).filter(MovieModel.is_deleted == False).order_by(MovieModel.id)
             if only_new is not None:
                 movies_objs = movies_base_query.filter(MovieModel.is_brand_new == only_new).all()
             else:
@@ -133,8 +185,8 @@ class MovieModel(Base):
             # Parse records into Pydantic Models
             for movie in movies_objs:
                 movie_obj_dict = PydntMovieModel.from_orm(movie).dict()
-                movie_obj_dict['image_urls'] = generate_pre_signed_s3_url(movie_obj_dict['image_urls'])
-                movie_obj_dict['video_urls'] = generate_pre_signed_s3_url(movie_obj_dict['video_urls'])
+                movie_obj_dict['image_urls'] = generate_pre_signed_s3_urls(movie_obj_dict['image_urls'])
+                movie_obj_dict['video_urls'] = generate_pre_signed_s3_urls(movie_obj_dict['video_urls'])
                 movies_list.append(movie_obj_dict)
         except Exception as e:
             logger.exception(e, exc_info=True)
@@ -154,14 +206,14 @@ class MovieModel(Base):
             raise e.__class__(e)
 
 
-class MovieStar(Base):
+class MovieStarModel(Base):
     __tablename__ = 'movie_stars'
 
     id = Column(Integer, primary_key=True)
     star_name = Column('name', String(50), nullable=False)
     carrier_started_at = Column(Date)
+    total_movies = Column(Integer, default=0)
     image_urls = Column(ARRAY(String))
-    total_movies = Column(Integer, nullable=False, default=0)
     created_at = Column(DateTime(timezone=True), default=datetime.utcnow())
     modified_at = Column(DateTime(timezone=True))
 
@@ -196,6 +248,41 @@ class MovieStar(Base):
             logger.exception(e, exc_info=True)
             raise e.__class__(e)
 
+    @staticmethod
+    def get_star(star_ids: list[int]) -> list[MovieStarsMapping] | MovieStarModel | None:
+        """
+        This method gets MovieStarModel object from the database using passed star_id.
+        :param star_ids: Ids of the MovieStar objects
+        :return: MovieStarModel Object
+        """
+        session = Session()
+        star_objs = None
+        try:
+            star_objs = session.query(MovieStarModel).filter(MovieStarModel.id.in_(star_ids)).all()
+            if len(star_objs) == 1:
+                star_objs = star_objs[0]
+            elif len(star_objs) == 0:
+                star_objs = None
+        except Exception as e:
+            logger.exception(e, exc_info=True)
+        finally:
+            session.close()
+            return star_objs
+
+    @classmethod
+    def get_all_moviestars(cls, movie_id):
+        moviestar_list = []
+        try:
+            star_mappings = MovieStarsMapping.get_all_mappings(movie_id=movie_id)
+            star_objs = cls.get_star(star_mappings)
+
+            for star_obj in star_objs:
+                star_dict = PydntMovieStarModel.from_orm(star_obj).dict()
+                moviestar_list.append(star_dict)
+        except Exception as e:
+            logger.exception(e, exc_info=True)
+        return moviestar_list
+
 
 class MovieStarsMapping(Base):
     __tablename__ = 'movie_stars_mapping'
@@ -205,24 +292,30 @@ class MovieStarsMapping(Base):
     created_at = Column(DateTime(timezone=True), default=datetime.utcnow())
     modified_at = Column(DateTime(timezone=True))
 
-    def add_movie_star_mapping(self, sid: int, mid: int):
+    @staticmethod
+    def get_all_mappings(movie_id: int) -> list[MovieStarsMapping | None]:
+        session = Session()
+        movie_star_mappings = []
         try:
-            setattr(self, 'star_id', sid)
-            setattr(self, 'movie_id', mid)
-            self.save()
+            movie_star_mappings = session.query(MovieStarsMapping.star_id)\
+                .filter(MovieStarsMapping.movie_id == movie_id).all()
         except Exception as e:
             logger.exception(e, exc_info=True)
             raise e.__class__(e)
+        finally:
+            session.close()
+            return movie_star_mappings
 
     @staticmethod
-    def remove_movie_star_mapping(sid: int, mid: int):
+    def remove_movie_star_mappings(sids: list[int], mid: int):
         session = Session(expire_on_commit=True)
         try:
-            session.query(MovieStarsMapping).filter(MovieStarsMapping.star_id == sid)\
+            session.query(MovieStarsMapping).filter(MovieStarsMapping.star_id.in_(sids)) \
                 .filter(MovieStarsMapping.movie_id == mid).delete(synchronize_session=False)
             session.commit()
         except Exception as e:
             logger.exception(e, exc_info=True)
+            raise e.__class__(e)
         finally:
             session.close()
 
@@ -230,6 +323,18 @@ class MovieStarsMapping(Base):
         session = Session(expire_on_commit=True)
         try:
             session.add(self)
+            session.commit()
+        except Exception as e:
+            logger.exception(e, exc_info=True)
+            raise e.__class__(e)
+        finally:
+            session.close()
+
+    @staticmethod
+    def bulk_save(objs: list[MovieStarsMapping]):
+        session = Session(expire_on_commit=True)
+        try:
+            session.bulk_save_objects(objs)
             session.commit()
         except Exception as e:
             logger.exception(e, exc_info=True)

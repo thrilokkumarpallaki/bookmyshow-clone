@@ -1,7 +1,6 @@
 import os
 import tempfile
 from typing import Any
-from datetime import datetime, timedelta
 
 import boto3
 from boto3.s3.transfer import TransferConfig
@@ -103,7 +102,7 @@ def construct_s3_object_url(s3_key: str) -> str:
     return s3_object_url
 
 
-def generate_pre_signed_s3_url(s3_object_urls: str):
+def generate_pre_signed_s3_urls(s3_object_urls: str):
     pre_signed_urls = []
 
     for s3_object_url in s3_object_urls:
