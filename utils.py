@@ -1,4 +1,6 @@
 import os
+import datetime
+import json
 import tempfile
 from typing import Any
 
@@ -20,9 +22,24 @@ AWS_REGION = os.environ['aws_region']
 ALLOWED_FILE_EXTENSIONS = {'JPEG': 'image', 'JPG': 'image', 'PNG': 'image', 'MP4': 'video', 'MOV': 'video'}
 
 
+class TimeTypeEncoder(json.JSONEncoder):
+    def default(self, obj: Any) -> Any:
+        if isinstance(obj, datetime.time):
+            time_str = obj.strftime('%H:%M:%S')
+            return time_str
+        if isinstance(obj, datetime.datetime):
+            datetime_str = obj.strftime('%a, %d %b %Y %H:%M:%S %Z')
+            return datetime_str
+        if obj == "":
+            print(obj)
+        return json.JSONEncoder.default(self, obj)
+
+
 def create_response(resp_json, status=200) -> Response:
-    resp = jsonify(resp_json)
-    return make_response(resp, status)
+    resp = json.dumps(resp_json, cls=TimeTypeEncoder)
+    resp = make_response(resp, status)
+    resp.headers['Content-Type'] = 'application/json'
+    return resp
 
 
 def allowed_file_formats(file_name: str) -> tuple[bool, Any | None, Any | None]:
