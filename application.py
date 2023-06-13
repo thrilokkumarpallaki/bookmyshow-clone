@@ -24,6 +24,7 @@ jwt = JWTManager(app)
 # Register controllers
 app.register_blueprint(auth_api)
 app.register_blueprint(movies_api)
+app.register_blueprint(theater_api)
 
 
 @jwt.user_identity_loader
